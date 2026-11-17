@@ -92,9 +92,10 @@ concurrency:
 
 jobs:
   review:
-    uses: fredericowu/aw-shared-workflows/.github/workflows/code-review-reusable.yml@v1.9.0
+    uses: fredericowu/aw-shared-workflows/.github/workflows/code-review-reusable.yml@master
     with:
       ci_check_name: pytest
+      agent_slug: code-reviewer-pipeline
     # Declared here as well as in the called workflow: for a reusable
     # workflow the effective GITHUB_TOKEN permissions are the INTERSECTION
     # of the two, so a scope omitted here cannot be granted by the shared
