@@ -10,6 +10,7 @@ Run: .venv/aw/bin/python -m pytest tests/test_kanban.py
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -30,6 +31,7 @@ from notion_app.kanban.client import (  # noqa: E402
     text_to_rich_text,
 )
 from notion_app.kanban.config import DEFAULT_STATUSES, KanbanConfig  # noqa: E402
+from notion_app.kanban.provenance import caller_run  # noqa: E402
 from notion_app.mcp import http_handler  # noqa: E402
 
 DB_ID = "3645bf3b-9510-80d9-af78-d085fc94d571"
@@ -57,6 +59,12 @@ SCHEMA = {
     "DeployFromVersion": {"type": "rich_text"},
     "DeployCheckResult": {"type": "rich_text"},
     "LastDeployCheckAt": {"type": "date"},
+}
+
+SCHEMA_WITH_PROVENANCE = {
+    **SCHEMA,
+    "CreateRunId": {"type": "rich_text"},
+    "UpdateRunIds": {"type": "rich_text"},
 }
 
 
@@ -2236,3 +2244,63 @@ def test_get_card_body_failure_does_not_sink_the_card():
     card = board.get_card("page-1", include_body=True)
     assert card["title"] == "A card"
     assert card["body_md"] == ""
+
+
+def test_create_stamps_trusted_run_id_atomically():
+    board, fake = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_PROVENANCE},
+        ("POST", "/pages"): {"id": "new-page", "url": "https://notion.so/new-page"},
+    })
+    with caller_run("run-create"):
+        result = board.create_card(title="Provenance")
+
+    assert result["ok"] and result["is_new"]
+    create = next(body for method, path, body in fake.calls
+                  if method == "POST" and path == "/pages")
+    props = create["properties"]
+    assert props["CreateRunId"]["rich_text"][0]["text"]["content"] == "run-create"
+    assert props["UpdateRunIds"]["rich_text"][0]["text"]["content"] == "[]"
+
+
+def test_successful_update_appends_once_and_protects_managed_fields():
+    state = {"runs": []}
+
+    def page(_body):
+        return {"id": "page-1", "properties": {
+            "UpdateRunIds": {"type": "rich_text", "rich_text": [
+                {"plain_text": json.dumps(state["runs"], separators=(",", ":"))}
+            ]},
+        }}
+
+    def patch(body):
+        value = body["properties"]["UpdateRunIds"]["rich_text"][0]["text"]["content"]
+        state["runs"] = json.loads(value)
+        return {}
+
+    board, fake = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA_WITH_PROVENANCE},
+        ("GET", "/pages/page-1"): page,
+        ("PATCH", "/pages/page-1"): patch,
+        ("POST", "/comments"): {},
+    })
+    with caller_run("run-update"):
+        assert board.add_comment("page-1", "one")["ok"]
+        assert board.add_comment("page-1", "two")["ok"]
+
+    assert state["runs"] == ["run-update"]
+    assert board.set_property("page-1", "CreateRunId", "spoof") == {
+        "ok": False,
+        "error": "CreateRunId is managed server-side and cannot be set directly",
+    }
+    provenance_patches = [body for method, path, body in fake.calls
+                          if method == "PATCH" and path == "/pages/page-1"
+                          and "UpdateRunIds" in body["properties"]]
+    assert len(provenance_patches) == 1
+
+
+def test_failed_mutation_does_not_stamp_update_run():
+    board, fake = _board()
+    with caller_run("run-failed"):
+        result = board.add_comment("page-1", "")
+    assert not result["ok"]
+    assert not any(path == "/pages/page-1" for _method, path, _body in fake.calls)

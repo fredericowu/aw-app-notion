@@ -27,7 +27,7 @@ config path and is read back off ``ctx.config``.
 """
 from __future__ import annotations
 
-from fastapi import Body, FastAPI
+from fastapi import Body, FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response
 
@@ -36,6 +36,7 @@ from .job import SyncJob
 from .kanban.cards import KanbanBoard
 from .kanban.client import NotionClient, NotionError
 from .kanban.config import KanbanConfig
+from .kanban.provenance import CALLER_RUN_ID_HEADER, caller_run
 
 TOKEN_KEY = "notion_token"
 
@@ -211,24 +212,27 @@ def build_routes(ctx) -> FastAPI:
                        include_comments=include_comments)
 
     @app.post("/kanban/cards")
-    async def kanban_create(data: dict = Body(...)):
-        return _kanban(board.create_card, **{
+    async def kanban_create(request: Request, data: dict = Body(...)):
+        with caller_run(request.headers.get(CALLER_RUN_ID_HEADER)):
+            return _kanban(board.create_card, **{
             k: data.get(k) for k in (
                 "title", "finding_key", "priority", "agent_slug", "target_slug", "plan_slug",
                 "input_text", "check_hint", "description", "plan", "source", "tags",
                 "parent_card")
             if data.get(k) is not None
-        })
+            })
 
     @app.post("/kanban/move")
-    async def kanban_move(data: dict = Body(...)):
-        return _kanban(board.move_card, data.get("page_id") or "",
-                       data.get("status") or "", data.get("comment") or "")
+    async def kanban_move(request: Request, data: dict = Body(...)):
+        with caller_run(request.headers.get(CALLER_RUN_ID_HEADER)):
+            return _kanban(board.move_card, data.get("page_id") or "",
+                           data.get("status") or "", data.get("comment") or "")
 
     @app.post("/kanban/comment")
-    async def kanban_comment(data: dict = Body(...)):
-        return _kanban(board.add_comment, data.get("page_id") or "",
-                       data.get("text") or "")
+    async def kanban_comment(request: Request, data: dict = Body(...)):
+        with caller_run(request.headers.get(CALLER_RUN_ID_HEADER)):
+            return _kanban(board.add_comment, data.get("page_id") or "",
+                           data.get("text") or "")
 
     @app.get("/kanban/properties")
     async def kanban_get_properties(page_id: str, properties: str = ""):
@@ -236,9 +240,10 @@ def build_routes(ctx) -> FastAPI:
         return _kanban(board.get_properties, page_id, names)
 
     @app.post("/kanban/set-property")
-    async def kanban_set_property(data: dict = Body(...)):
-        return _kanban(board.set_property, data.get("page_id") or "",
-                       data.get("property") or "", data.get("value"))
+    async def kanban_set_property(request: Request, data: dict = Body(...)):
+        with caller_run(request.headers.get(CALLER_RUN_ID_HEADER)):
+            return _kanban(board.set_property, data.get("page_id") or "",
+                           data.get("property") or "", data.get("value"))
 
     @app.get("/kanban/cards-need-attention")
     async def kanban_cards_need_attention(limit: int = 10, reping: bool = False):
@@ -350,15 +355,16 @@ def build_routes(ctx) -> FastAPI:
     # ------------------------------------------------------------------
 
     @app.post("/mcp")
-    async def mcp_post(data: dict | list = Body(...)):
+    async def mcp_post(request: Request, data: dict | list = Body(...)):
         from .mcp.http_handler import handle_request as mcp_handle_request
 
         messages = data if isinstance(data, list) else [data]
         responses = []
-        for m in messages:
-            r = await mcp_handle_request(m, board=board)
-            if r is not None:
-                responses.append(r)
+        with caller_run(request.headers.get(CALLER_RUN_ID_HEADER)):
+            for m in messages:
+                r = await mcp_handle_request(m, board=board)
+                if r is not None:
+                    responses.append(r)
         if not responses:
             return Response(status_code=202)
         return JSONResponse(responses if isinstance(data, list) else responses[0])
