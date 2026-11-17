@@ -24,8 +24,11 @@ than silently doing nothing under a name that promises delivery.
 """
 from __future__ import annotations
 
+import functools
+import json
 import logging
 import os
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
@@ -46,6 +49,7 @@ from .client import (
 from .check_hint_lint import lint_check_hint
 from .config import KanbanConfig
 from .deploy_lint import lint_deploy_component, lint_deploy_to_version
+from .provenance import current_run_id
 from .. import apmt
 
 log = logging.getLogger("aw_apps.notion.kanban")
@@ -63,6 +67,30 @@ _DEPLOY_LINTERS = {
     "DeployComponent": lint_deploy_component,
     "DeployToVersion": lint_deploy_to_version,
 }
+
+_PROVENANCE_PROPERTIES = frozenset({"CreateRunId", "UpdateRunIds"})
+_PROVENANCE_LIMIT = 2000
+
+
+def _tracked_mutation(fn):
+    """Stamp one successful logical mutation, including compound operations."""
+    @functools.wraps(fn)
+    def wrapped(self, *args, **kwargs):
+        depth = getattr(self._mutation_state, "depth", 0)
+        outermost = depth == 0
+        self._mutation_state.depth = depth + 1
+        try:
+            result = fn(self, *args, **kwargs)
+        finally:
+            self._mutation_state.depth = depth
+        if (outermost and isinstance(result, dict) and result.get("ok")
+                and not result.get("skipped") and not result.get("is_new")):
+            page_id = str(result.get("page_id") or "").strip()
+            run_id = current_run_id()
+            if page_id and run_id:
+                self._record_update_run(page_id, run_id)
+        return result
+    return wrapped
 
 
 def _today() -> str:
@@ -113,6 +141,46 @@ class KanbanBoard:
         # Injected so tests never touch the network, and lazy so that an app
         # instance that never attaches a presentation never builds one.
         self._presentations = presentations
+        self._mutation_state = threading.local()
+        self._provenance_locks_guard = threading.Lock()
+        self._provenance_locks: dict[str, threading.Lock] = {}
+
+    def _provenance_lock(self, page_id: str) -> threading.Lock:
+        with self._provenance_locks_guard:
+            return self._provenance_locks.setdefault(page_id, threading.Lock())
+
+    def _record_update_run(self, page_id: str, run_id: str) -> None:
+        """Merge one run into UpdateRunIds without duplicates or truncation."""
+        with self._provenance_lock(page_id):
+            for _attempt in range(4):
+                page = self.client.get_page(page_id)
+                props = page.get("properties", {})
+                spec = props.get("UpdateRunIds")
+                if not spec:
+                    raise NotionError(409, "board schema is missing UpdateRunIds")
+                raw = extract_property_value(spec) or "[]"
+                try:
+                    values = json.loads(raw)
+                except (TypeError, ValueError) as exc:
+                    raise NotionError(409, "UpdateRunIds is not a JSON array") from exc
+                if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+                    raise NotionError(409, "UpdateRunIds is not a JSON string array")
+                if run_id in values:
+                    return
+                merged = [*values, run_id]
+                encoded = json.dumps(merged, separators=(",", ":"))
+                if len(encoded) > _PROVENANCE_LIMIT:
+                    raise NotionError(409, "UpdateRunIds exceeds Notion's 2000-character rich_text limit")
+                self.client.patch_page(
+                    page_id, {"UpdateRunIds": build_property_payload(spec.get("type", ""), encoded)})
+                check = self.client.get_page(page_id).get("properties", {}).get("UpdateRunIds", {})
+                try:
+                    observed = json.loads(extract_property_value(check) or "[]")
+                except (TypeError, ValueError):
+                    observed = []
+                if all(value in observed for value in merged):
+                    return
+            raise NotionError(409, "concurrent UpdateRunIds writes did not converge")
 
     def _require_db(self) -> str:
         db_id = self.config.database_id
@@ -526,12 +594,15 @@ class KanbanBoard:
         return {k: extract_property_value(v) for k, v in props.items()}
 
     # ── write ───────────────────────────────────────────────────────────
+    @_tracked_mutation
     def set_property(self, page_id: str, property_name: str, value: Any) -> dict:
         # Coerce first — everything downstream (the CheckHint linter, the
         # payload builder, and the value echoed back below) must see the
         # real value, not a transport-stringified "false"/"null" that would
         # make this method both write and report the wrong thing.
         value = coerce_transport_value(value)
+        if property_name in _PROVENANCE_PROPERTIES:
+            return {"ok": False, "error": f"{property_name} is managed server-side and cannot be set directly"}
         if property_name == "CheckHint" and isinstance(value, str) and value.strip():
             risks = lint_check_hint(value)
             if risks:
@@ -570,6 +641,7 @@ class KanbanBoard:
         self.client.patch_page(page_id, {property_name: payload})
         return {"ok": True, "page_id": page_id, "property": property_name, "value": value}
 
+    @_tracked_mutation
     def add_comment(self, page_id: str, text: str) -> dict:
         """Post a comment, chunked to Notion's rich_text limit.
 
@@ -588,6 +660,7 @@ class KanbanBoard:
         self.client.post_comment(page_id, rich_text)
         return {"ok": True, "page_id": page_id}
 
+    @_tracked_mutation
     def attach_file(self, page_id: str, file_path: str, caption: str = "") -> dict:
         """Upload a local file and append it to a page as a block.
 
@@ -632,6 +705,7 @@ class KanbanBoard:
                 "bytes": len(content), "block_type": media_type,
                 "file_upload_id": upload_id}
 
+    @_tracked_mutation
     def delete_block(self, page_id: str, block_id: str = "", match: str = "") -> dict:
         """Remove a block — either directly by ``block_id``, or by matching
         a top-level file/pdf/image block's filename/caption on ``page_id``
@@ -675,6 +749,7 @@ class KanbanBoard:
             self._presentations = PresentationsClient()
         return self._presentations
 
+    @_tracked_mutation
     def attach_presentation(self, page_id: str, presentation_id: str) -> dict:
         """Attach a presentation to a card as a PNG *and* a live share link.
 
@@ -726,6 +801,7 @@ class KanbanBoard:
                 "URL, so any link written here would not resolve from Notion.")
         return result
 
+    @_tracked_mutation
     def move_card(self, page_id: str, status: str, comment: str = "") -> dict:
         """Move a card's status, posting ``comment`` first if given.
 
@@ -758,6 +834,7 @@ class KanbanBoard:
                 "note": "Status updated in Notion. Dispatching an agent run on 'ready' is "
                         "agents-platform's job and is not wired into this app."}
 
+    @_tracked_mutation
     def set_qa_status(self, page_id: str, status: str, comment: str = "") -> dict:
         """QA verdict: stamp ``QAStatus`` when the board has it, then move.
 
@@ -778,6 +855,7 @@ class KanbanBoard:
         return {"ok": moved.get("ok", False), "page_id": page_id, "status": status,
                 "qa_status_stamped": stamped.get("ok", False), "move": moved}
 
+    @_tracked_mutation
     def set_blocker(self, page_id: str, comment: str) -> dict:
         """Blocked mid-task → comment + move to need_human.
 
@@ -795,6 +873,7 @@ class KanbanBoard:
         return result
 
     # ── create ──────────────────────────────────────────────────────────
+    @_tracked_mutation
     def create_card(self, *, title: str, finding_key: str = "", priority: str = "Medium",
                     agent_slug: str = "", target_slug: str = "", plan_slug: str = "",
                     input_text: str = "", check_hint: str = "", description: str = "",
@@ -834,6 +913,12 @@ class KanbanBoard:
             return self._bump_existing(existing, plan=plan, today=today)
 
         schema = self.client.database_schema(db_id)
+        if current_run_id():
+            missing = sorted(_PROVENANCE_PROPERTIES.difference(schema))
+            if missing:
+                return {"ok": False, "error": (
+                    "board schema is missing managed provenance properties: "
+                    + ", ".join(missing))}
         status_prop = status_property_name(schema)
         status_type = schema.get(status_prop, {}).get("type", "select")
         title_prop = next((n for n, s in schema.items() if s.get("type") == "title"), "Name")
@@ -858,6 +943,8 @@ class KanbanBoard:
             "LastSeenAt": today,
             "Tags": tags[:5] if tags else None,
             "ParentCard": parent_card or "",
+            "CreateRunId": current_run_id(),
+            "UpdateRunIds": "[]" if current_run_id() else "",
         }
         for name, value in optional.items():
             if name not in schema or value in ("", None, []):
