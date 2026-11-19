@@ -288,3 +288,22 @@ def test_status_drift_is_scoped_to_the_configured_board(monkeypatch):
         assert drift_b["ok"] is False and "CreateRunId" in drift_b["missing"]
         ctx.config = {"kanban_database_id": "db-never-checked"}
         assert http.get("/status").json()["kanban"]["schema"] == {"checked": False}
+
+
+def test_older_check_finishing_late_does_not_overwrite_a_newer_repair():
+    """Review finding (PR #19 round 2): a dry run that read the board before
+    a concurrent repair must not replace the repair's verified result."""
+    db = "db-race"
+    repaired = SchemaClient({"Status": {"type": "status"}})
+    schema_mod._record({"ok": True, "database_id": db, "missing": ["CreateRunId"],
+                        "created": ["CreateRunId"], "conflicts": [], "error": None},
+                       started=200.0)
+    # the stale dry run started earlier (100.0) but finishes now
+    schema_mod._record({"ok": True, "dry_run": True, "database_id": db,
+                        "missing": ["CreateRunId"], "created": [], "conflicts": [],
+                        "error": None}, started=100.0)
+    assert schema_mod.drift(schema_mod.last_result(db))["ok"] is True
+    assert "_started" not in schema_mod.last_result(db)
+    # and a genuinely newer check still replaces it
+    schema_mod.ensure_schema(repaired, db, dry_run=True)
+    assert schema_mod.drift(schema_mod.last_result(db))["ok"] is False

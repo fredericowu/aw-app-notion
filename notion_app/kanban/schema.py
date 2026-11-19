@@ -100,9 +100,16 @@ def _property_spec(name: str, ptype: str) -> dict:
     return {ptype: {}}
 
 
-def _record(result: dict) -> dict:
+def _record(result: dict, started: float | None = None) -> dict:
+    """Cache ``result`` for its board unless a check that STARTED later has
+    already been recorded — so a slow dry run that read the board before a
+    concurrent repair can't overwrite the repair's newer, verified outcome."""
+    started = time.monotonic() if started is None else started
+    key = result.get("database_id") or ""
     with _last_lock:
-        _last_results[result.get("database_id") or ""] = {**result, "checked_at": time.time()}
+        prior = _last_results.get(key)
+        if prior is None or prior.get("_started", float("-inf")) <= started:
+            _last_results[key] = {**result, "checked_at": time.time(), "_started": started}
     return result
 
 
@@ -112,7 +119,9 @@ def last_result(db_id: str) -> dict:
     ``GET /status`` reports, so polling the status widget never costs a
     Notion call."""
     with _last_lock:
-        return dict(_last_results.get(db_id or "", {}))
+        cached = dict(_last_results.get(db_id or "", {}))
+    cached.pop("_started", None)
+    return cached
 
 
 def ensure_schema(client, db_id: str, dry_run: bool = False) -> dict:
@@ -123,12 +132,13 @@ def ensure_schema(client, db_id: str, dry_run: bool = False) -> dict:
     call actually added (always empty on ``dry_run``). Never raises — it runs
     from ``activate()``, which must not be blocked by a Notion outage.
     """
+    started = time.monotonic()
     result: dict[str, Any] = {"ok": False, "dry_run": dry_run, "database_id": db_id or "",
                               "present": [], "missing": [], "created": [],
                               "conflicts": [], "error": None}
     if not db_id:
         result["error"] = "kanban_database_id is not configured"
-        return _record(result)
+        return _record(result, started)
     try:
         schema = client.database_schema(db_id)
         for name, want in MANAGED_PROPERTIES.items():
@@ -153,7 +163,7 @@ def ensure_schema(client, db_id: str, dry_run: bool = False) -> dict:
             not_landed = sorted(set(result["missing"]) - set(result["created"]))
             if not_landed:
                 result["error"] = "properties not present after update: " + ", ".join(not_landed)
-                return _record(result)
+                return _record(result, started)
         result["ok"] = True
     except NotionError as exc:
         result["error"] = str(exc)
@@ -166,7 +176,7 @@ def ensure_schema(client, db_id: str, dry_run: bool = False) -> dict:
         log.warning("kanban: board schema conflicts left untouched: %s", result["conflicts"])
     if result["error"]:
         log.warning("kanban: ensure_schema failed: %s", result["error"])
-    return _record(result)
+    return _record(result, started)
 
 
 def ensure_in_background(client, db_id: str) -> threading.Thread | None:
