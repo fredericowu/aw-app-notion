@@ -77,6 +77,10 @@ def test_missing_properties_are_created_via_patch_databases():
     assert body["properties"]["CreateRunId"] == {"rich_text": {}}
     assert body["properties"]["is_live"] == {"checkbox": {}}
     assert body["properties"]["LastSeenAt"] == {"date": {}}
+    # written by the agents-platform-runners deploy reconciler
+    assert body["properties"]["DeployCheckResult"] == {"rich_text": {}}
+    assert body["properties"]["LastDeployCheckAt"] == {"date": {}}
+    assert body["properties"]["LastDeployReminderAt"] == {"date": {}}
     assert "FindingKey" not in body["properties"]  # never re-sent
     assert client.schema["UpdateRunIds"]["type"] == "rich_text"
 
@@ -214,7 +218,7 @@ def test_background_helper_skips_without_token_or_board():
     assert real(unconfigured, DB) is None
     t = real(SchemaClient(_full_schema()), DB)
     t.join(5)
-    assert schema_mod.last_result()["ok"] is True
+    assert schema_mod.last_result(DB)["ok"] is True
 
 
 def test_ensure_route_and_status_drift(monkeypatch):
@@ -222,7 +226,8 @@ def test_ensure_route_and_status_drift(monkeypatch):
 
     def fake_ensure(client, db_id, dry_run=False):
         calls.append((db_id, dry_run))
-        return schema_mod._record({"ok": True, "dry_run": dry_run, "missing": ["CreateRunId"],
+        return schema_mod._record({"ok": True, "dry_run": dry_run, "database_id": db_id,
+                                   "missing": ["CreateRunId"],
                                    "created": [], "present": [], "conflicts": [],
                                    "error": None})
 
@@ -257,3 +262,29 @@ def test_create_card_error_points_at_the_ensure_route():
     with caller_run("run-1"):
         r = board.create_card(title="x")
     assert "/kanban/schema/ensure" in r["error"]
+
+
+def test_select_agent_slug_is_accepted_not_a_conflict():
+    schema = _full_schema()
+    schema["AgentSlug"] = {"type": "select"}
+    client = SchemaClient(schema)
+    r = schema_mod.ensure_schema(client, DB)
+    assert r["conflicts"] == [] and "AgentSlug" in r["present"]
+    assert client.writes == []
+
+
+def test_status_drift_is_scoped_to_the_configured_board(monkeypatch):
+    """Board A checked healthy, then the id switches to B: status must not
+    report A's health under B — and a late A result must not clobber B's."""
+    healthy = SchemaClient(_full_schema())
+    broken = SchemaClient({"Status": {"type": "status"}})
+    schema_mod.ensure_schema(broken, "db-B", dry_run=True)   # B finishes first
+    schema_mod.ensure_schema(healthy, "db-A")                # late A finishes after
+    with tempfile.TemporaryDirectory() as tmp:
+        ctx = FakeCtx(package_dir=tmp)
+        ctx.config = {"kanban_database_id": "db-B"}
+        http = TestClient(routes.build_routes(ctx))
+        drift_b = http.get("/status").json()["kanban"]["schema"]
+        assert drift_b["ok"] is False and "CreateRunId" in drift_b["missing"]
+        ctx.config = {"kanban_database_id": "db-never-checked"}
+        assert http.get("/status").json()["kanban"]["schema"] == {"checked": False}

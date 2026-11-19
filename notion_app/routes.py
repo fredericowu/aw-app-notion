@@ -81,7 +81,7 @@ def build_routes(ctx) -> FastAPI:
                 "statuses": kanban_cfg.statuses,
                 # Last ensure_schema outcome (activate / config change / the
                 # ensure route) — cached, so polling status costs no Notion call.
-                "schema": schema_mod.drift(schema_mod.last_result()),
+                "schema": schema_mod.drift(schema_mod.last_result(kanban_cfg.database_id)),
             },
         }
 

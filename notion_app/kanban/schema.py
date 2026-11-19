@@ -64,8 +64,20 @@ MANAGED_PROPERTIES: dict[str, str] = {
     # deploy bookkeeping (set_kanban_property + kanban_check_deployed)
     "DeployComponent": "rich_text",
     "DeployToVersion": "rich_text",
+    # written by aw-app-agents-platform-runners' deploy reconciler through
+    # this app's set-property route (deploy_reconcile.py)
+    "DeployCheckResult": "rich_text",
+    "LastDeployCheckAt": "date",
+    "LastDeployReminderAt": "date",
     "is_live": "checkbox",
     "is_deployment_needed": "checkbox",
+}
+
+# Other existing types that are equally valid for a managed name — the
+# writers use the live property type, so these are not conflicts. The first
+# (MANAGED_PROPERTIES) type is still what gets created when missing.
+_ALSO_ACCEPTED: dict[str, frozenset[str]] = {
+    "AgentSlug": frozenset({"select"}),
 }
 
 # Select options seeded on creation only. Existing options are never touched.
@@ -74,7 +86,9 @@ _SELECT_OPTIONS: dict[str, list[str]] = {
     "QAStatus": ["need_human", "ready_to_deploy", "done"],
 }
 
-_last_result: dict[str, Any] = {}
+# database_id → last result. Keyed so a board-id change never reports the
+# previous board's health under the new id.
+_last_results: dict[str, dict[str, Any]] = {}
 _last_lock = threading.Lock()
 
 
@@ -88,17 +102,17 @@ def _property_spec(name: str, ptype: str) -> dict:
 
 def _record(result: dict) -> dict:
     with _last_lock:
-        _last_result.clear()
-        _last_result.update(result, checked_at=time.time())
+        _last_results[result.get("database_id") or ""] = {**result, "checked_at": time.time()}
     return result
 
 
-def last_result() -> dict:
-    """The most recent :func:`ensure_schema` outcome in this process, or
-    ``{}`` if it never ran. Cheap — what ``GET /status`` reports, so polling
-    the status widget never costs a Notion call."""
+def last_result(db_id: str) -> dict:
+    """The most recent :func:`ensure_schema` outcome for ``db_id`` in this
+    process, or ``{}`` if it never ran for that board. Cheap — what
+    ``GET /status`` reports, so polling the status widget never costs a
+    Notion call."""
     with _last_lock:
-        return dict(_last_result)
+        return dict(_last_results.get(db_id or "", {}))
 
 
 def ensure_schema(client, db_id: str, dry_run: bool = False) -> dict:
@@ -121,7 +135,8 @@ def ensure_schema(client, db_id: str, dry_run: bool = False) -> dict:
             spec = schema.get(name)
             if spec is None:
                 result["missing"].append(name)
-            elif spec.get("type") != want:
+            elif spec.get("type") != want and spec.get("type") not in _ALSO_ACCEPTED.get(
+                    name, frozenset()):
                 result["conflicts"].append(
                     {"property": name, "expected": want, "actual": spec.get("type")})
             else:
