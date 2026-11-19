@@ -100,16 +100,18 @@ def _property_spec(name: str, ptype: str) -> dict:
     return {ptype: {}}
 
 
-def _record(result: dict, started: float | None = None) -> dict:
-    """Cache ``result`` for its board unless a check that STARTED later has
-    already been recorded — so a slow dry run that read the board before a
-    concurrent repair can't overwrite the repair's newer, verified outcome."""
-    started = time.monotonic() if started is None else started
+def _record(result: dict, observed: float | None = None) -> dict:
+    """Cache ``result`` for its board unless the cached one reflects a LATER
+    read of the board. ``observed`` is when this check's last schema read was
+    issued (monotonic) — not when the check started — so whichever result
+    saw the newest board state wins, regardless of finish order: a slow dry
+    run can't hide a verified repair, and vice versa."""
+    observed = time.monotonic() if observed is None else observed
     key = result.get("database_id") or ""
     with _last_lock:
         prior = _last_results.get(key)
-        if prior is None or prior.get("_started", float("-inf")) <= started:
-            _last_results[key] = {**result, "checked_at": time.time(), "_started": started}
+        if prior is None or prior.get("_observed", float("-inf")) <= observed:
+            _last_results[key] = {**result, "checked_at": time.time(), "_observed": observed}
     return result
 
 
@@ -120,7 +122,7 @@ def last_result(db_id: str) -> dict:
     Notion call."""
     with _last_lock:
         cached = dict(_last_results.get(db_id or "", {}))
-    cached.pop("_started", None)
+    cached.pop("_observed", None)
     return cached
 
 
@@ -132,14 +134,15 @@ def ensure_schema(client, db_id: str, dry_run: bool = False) -> dict:
     call actually added (always empty on ``dry_run``). Never raises — it runs
     from ``activate()``, which must not be blocked by a Notion outage.
     """
-    started = time.monotonic()
+    observed = time.monotonic()
     result: dict[str, Any] = {"ok": False, "dry_run": dry_run, "database_id": db_id or "",
                               "present": [], "missing": [], "created": [],
                               "conflicts": [], "error": None}
     if not db_id:
         result["error"] = "kanban_database_id is not configured"
-        return _record(result, started)
+        return _record(result, observed)
     try:
+        observed = time.monotonic()
         schema = client.database_schema(db_id)
         for name, want in MANAGED_PROPERTIES.items():
             spec = schema.get(name)
@@ -157,13 +160,14 @@ def ensure_schema(client, db_id: str, dry_run: bool = False) -> dict:
                                    for n in result["missing"]}}
             client.request("PATCH", f"/databases/{db_id}", body)
             # Confirm against the live board rather than trusting a 200.
+            observed = time.monotonic()
             after = client.database_schema(db_id)
             result["created"] = [n for n in result["missing"]
                                  if after.get(n, {}).get("type") == MANAGED_PROPERTIES[n]]
             not_landed = sorted(set(result["missing"]) - set(result["created"]))
             if not_landed:
                 result["error"] = "properties not present after update: " + ", ".join(not_landed)
-                return _record(result, started)
+                return _record(result, observed)
         result["ok"] = True
     except NotionError as exc:
         result["error"] = str(exc)
@@ -176,7 +180,7 @@ def ensure_schema(client, db_id: str, dry_run: bool = False) -> dict:
         log.warning("kanban: board schema conflicts left untouched: %s", result["conflicts"])
     if result["error"]:
         log.warning("kanban: ensure_schema failed: %s", result["error"])
-    return _record(result, started)
+    return _record(result, observed)
 
 
 def ensure_in_background(client, db_id: str) -> threading.Thread | None:
