@@ -288,3 +288,44 @@ def test_status_drift_is_scoped_to_the_configured_board(monkeypatch):
         assert drift_b["ok"] is False and "CreateRunId" in drift_b["missing"]
         ctx.config = {"kanban_database_id": "db-never-checked"}
         assert http.get("/status").json()["kanban"]["schema"] == {"checked": False}
+
+
+def test_result_from_the_newest_board_read_wins_regardless_of_finish_order(monkeypatch):
+    """Review findings (PR #19 r2, PR #20 r1): cached status must reflect the
+    result that READ the board last — a dry run that read before a repair's
+    verification must not overwrite it, whichever finishes first."""
+    db = "db-race"
+    clock = iter([300.0, 400.0])  # ensure_schema's two pre-read stamps (no PATCH)
+    monkeypatch.setattr(schema_mod.time, "monotonic", lambda: next(clock))
+    repair = {"ok": True, "database_id": db, "missing": ["CreateRunId"],
+              "created": ["CreateRunId"], "conflicts": [], "error": None}
+    stale = {"ok": True, "dry_run": True, "database_id": db, "missing": ["CreateRunId"],
+             "created": [], "conflicts": [], "error": None}
+
+    # repair verified at 200; stale dry run read at 100 but finishes later
+    schema_mod._record(repair, observed=200.0)
+    schema_mod._record(stale, observed=100.0)
+    assert schema_mod.drift(schema_mod.last_result(db))["ok"] is True
+    assert "_observed" not in schema_mod.last_result(db)
+
+    # a check whose read is genuinely newer (clock 300/400) still replaces it
+    schema_mod.ensure_schema(SchemaClient({"Status": {"type": "status"}}), db, dry_run=True)
+    assert schema_mod.drift(schema_mod.last_result(db))["ok"] is False
+
+
+def test_repair_verified_after_a_concurrent_dry_run_is_not_hidden():
+    """The PR #20 r1 scenario: repair starts first, a dry run reads while the
+    PATCH is pending, then the repair verifies — the repair must win."""
+    db = "db-race-2"
+    stale = {"ok": True, "dry_run": True, "database_id": db, "missing": ["CreateRunId"],
+             "created": [], "conflicts": [], "error": None}
+
+    class PatchRacesDryRun(SchemaClient):
+        def request(self, method, path, body=None):
+            out = super().request(method, path, body)
+            schema_mod._record(stale)  # dry run reads/records mid-PATCH
+            return out
+
+    r = schema_mod.ensure_schema(PatchRacesDryRun({"Status": {"type": "status"}}), db)
+    assert r["created"] and r["ok"] is True
+    assert schema_mod.drift(schema_mod.last_result(db))["ok"] is True
