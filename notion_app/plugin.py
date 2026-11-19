@@ -29,6 +29,8 @@ import os
 from . import apmt as apmt_mod
 from . import mcp_config
 from . import routes as routes_mod
+from .kanban import schema as schema_mod
+from .kanban.client import NotionClient
 from .kanban.config import KanbanConfig
 
 log = logging.getLogger("aw_apps.notion")
@@ -61,14 +63,33 @@ class NotionAppPlugin:
         except Exception:  # noqa: BLE001 — activation must never be blocked by this
             log.warning("apmt: boot reconcile failed", exc_info=True)
 
+        # Board-schema repair. activate() runs on install, update and every
+        # boot, so this is what keeps an existing board in step with the
+        # properties a newer release relies on (e.g. CreateRunId /
+        # UpdateRunIds). Background thread + fail-open: a slow or broken
+        # Notion must never delay or break activation.
+        self._last_db_id = kanban.database_id
+        self._schema_thread = self._ensure_schema(ctx, kanban.database_id)
+
     async def on_config_changed(self, ctx) -> None:
         """Core calls this after ``ctx.config`` is updated. Nothing to rebuild
         for the Kanban settings themselves — ``KanbanConfig`` re-reads
         ``ctx.config`` on every access — this is here only to log what the
         board is now pointed at, since a silently-wrong database_id is the
         one failure that looks identical to a permissions problem."""
-        log.info("aw-app-notion config changed: kanban board=%s",
-                 KanbanConfig(ctx).database_id or "not configured")
+        db_id = KanbanConfig(ctx).database_id
+        log.info("aw-app-notion config changed: kanban board=%s", db_id or "not configured")
+        if db_id != getattr(self, "_last_db_id", None):
+            self._last_db_id = db_id
+            self._schema_thread = self._ensure_schema(ctx, db_id)
+
+    def _ensure_schema(self, ctx, db_id: str | None):
+        try:
+            client = NotionClient(lambda: ctx.secrets.read(routes_mod.TOKEN_KEY))
+            return schema_mod.ensure_in_background(client, db_id or "")
+        except Exception:  # noqa: BLE001 — activation must never be blocked by this
+            log.warning("kanban: could not start board-schema check", exc_info=True)
+            return None
 
     def _write_mcp_json(self, ctx, token: str | None) -> dict:
         port = int(os.environ.get("AW_PORT") or 9030)
