@@ -23,6 +23,7 @@ Two things must be true, and they fail differently:
 | No `aw_kanban` tools exist at all | No Notion token saved | `POST /api/apps/notion/settings {"notion_token": "ntn_…"}`, then reload MCP Gateway |
 | Tools exist, every call returns "kanban_database_id is not configured" | Board id unset | `POST /api/apps/notion/config {"kanban_database_id": "…"}` |
 | Tools exist, calls return Notion `object_not_found` | The integration was never shared with the database | Notion UI → the board → ⋯ → Connect to → your integration |
+| `create_kanban_task` / comments / `set_kanban_property` fail with "board schema is missing …" (e.g. `CreateRunId`, `UpdateRunIds`) | The board predates properties this app version relies on | Repaired automatically on activate (install/update/boot) and on board-id change; to force it: `POST /api/apps/notion/kanban/schema/ensure` (`?dry_run=true` to preview). Additive only — a same-named property with a different type is reported under `conflicts` and left untouched. Current drift: `GET /api/apps/notion/status` → `kanban.schema` |
 
 That third one is the most common and the least obvious: a valid token
 grants access to *nothing* by itself. `object_not_found` from Notion almost

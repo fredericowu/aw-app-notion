@@ -33,6 +33,7 @@ from fastapi.responses import JSONResponse, Response
 
 from . import apmt as apmt_mod, mcp_config, sync as sync_mod
 from .job import SyncJob
+from .kanban import schema as schema_mod
 from .kanban.cards import KanbanBoard
 from .kanban.client import NotionClient, NotionError
 from .kanban.config import KanbanConfig
@@ -78,6 +79,9 @@ def build_routes(ctx) -> FastAPI:
                 "configured": kanban_cfg.configured,
                 "database_id": kanban_cfg.database_id,
                 "statuses": kanban_cfg.statuses,
+                # Last ensure_schema outcome (activate / config change / the
+                # ensure route) — cached, so polling status costs no Notion call.
+                "schema": schema_mod.drift(schema_mod.last_result()),
             },
         }
 
@@ -95,6 +99,9 @@ def build_routes(ctx) -> FastAPI:
             return {"error": f"{TOKEN_KEY} is required"}
         ctx.secrets.write(TOKEN_KEY, token)
         doc = mcp_config.write_mcp_json(ctx.package_dir, token)
+        # A new/rotated token may be the first one that can see the board —
+        # repair its schema in the background (never delays this response).
+        schema_mod.ensure_in_background(client, kanban_cfg.database_id)
         # Push the derived copy to agents-platform-multitenant (see apmt.py).
         # Deliberately NOT fatal: this app remains the source of truth, the
         # save has already succeeded locally, and the 360s reconcile repairs
@@ -244,6 +251,16 @@ def build_routes(ctx) -> FastAPI:
         with caller_run(request.headers.get(CALLER_RUN_ID_HEADER)):
             return _kanban(board.set_property, data.get("page_id") or "",
                            data.get("property") or "", data.get("value"))
+
+    @app.post("/kanban/schema/ensure")
+    async def kanban_schema_ensure(dry_run: bool = False):
+        """Validate the board against MANAGED_PROPERTIES and add whatever is
+        missing (additive only — conflicts are reported, never touched).
+        ``?dry_run=true`` reports without writing."""
+        result = await run_in_threadpool(
+            schema_mod.ensure_schema, client, kanban_cfg.database_id, dry_run)
+        code = 200 if result["ok"] else (503 if not kanban_cfg.database_id else 502)
+        return JSONResponse(result, status_code=code)
 
     @app.get("/kanban/cards-need-attention")
     async def kanban_cards_need_attention(limit: int = 10, reping: bool = False):

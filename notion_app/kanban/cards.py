@@ -157,7 +157,8 @@ class KanbanBoard:
                 props = page.get("properties", {})
                 spec = props.get("UpdateRunIds")
                 if not spec:
-                    raise NotionError(409, "board schema is missing UpdateRunIds")
+                    raise NotionError(409, "board schema is missing UpdateRunIds — POST "
+                                           "/api/apps/notion/kanban/schema/ensure to add it")
                 raw = extract_property_value(spec) or "[]"
                 try:
                     values = json.loads(raw)
@@ -918,7 +919,10 @@ class KanbanBoard:
             if missing:
                 return {"ok": False, "error": (
                     "board schema is missing managed provenance properties: "
-                    + ", ".join(missing))}
+                    + ", ".join(missing) + ". The app adds them automatically on "
+                    "activate/config change; to repair now, POST "
+                    "/api/apps/notion/kanban/schema/ensure (?dry_run=true to preview)."),
+                    "hint": "POST /api/apps/notion/kanban/schema/ensure"}
         status_prop = status_property_name(schema)
         status_type = schema.get(status_prop, {}).get("type", "select")
         title_prop = next((n for n, s in schema.items() if s.get("type") == "title"), "Name")

@@ -44,3 +44,19 @@ def block_apmt_network(monkeypatch):
 
     monkeypatch.setattr(apmt_mod, "_call", _refuse)
     return monkeypatch
+
+
+@pytest.fixture(autouse=True)
+def block_schema_background(monkeypatch):
+    """activate() and POST /settings kick off a background board-schema
+    check against api.notion.com. No test may make that real call by
+    accident; record the request instead. ``test_schema.py`` exercises the
+    real function through ``schema_mod.REAL_ENSURE_IN_BACKGROUND``."""
+    from notion_app.kanban import schema as schema_mod
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(schema_mod, "REAL_ENSURE_IN_BACKGROUND",
+                        schema_mod.ensure_in_background, raising=False)
+    monkeypatch.setattr(schema_mod, "ensure_in_background",
+                        lambda client, db_id: calls.append((client, db_id)))
+    return calls
