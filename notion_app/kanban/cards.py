@@ -255,7 +255,8 @@ class KanbanBoard:
     # 4175bf3b-9510-81e0).
     _REPING_UNROUTED_FAILOPEN_S = 48 * 3600
 
-    def list_cards_need_attention(self, *, limit: int = 10, reping: bool = False) -> dict:
+    def list_cards_need_attention(self, *, limit: int = 10, reping: bool = False,
+                                  offset: int = 0) -> dict:
         """Deterministic candidate list for the stale-card sweep: In Progress
         + Need Human cards, one merged ordered list, top ``limit`` (clamped
         1-25).
@@ -286,6 +287,10 @@ class KanbanBoard:
         never silent.
         """
         limit = max(1, min(int(limit), 25))
+        # ``offset`` pages the SAME deterministic ordering, so a caller whose
+        # first window is all back-offs/active runs can reach the cards behind
+        # it (the sweep saw 10 of ~42 cards every pass and never the rest).
+        offset = max(0, int(offset or 0))
         db_id = self._require_db()
         schema = self.client.database_schema(db_id)
         prop_name = status_property_name(schema)
@@ -358,11 +363,14 @@ class KanbanBoard:
                     deferred.append(card)
 
         cards.sort(key=self._need_attention_sort_key)
+        window = cards[offset:offset + limit]
         result = {
-            "count": min(len(cards), limit),
-            "cards": cards[:limit],
+            "count": len(window),
+            "cards": window,
             "scanned": len(pages),
             "truncated": truncated,
+            "offset": offset,
+            "next_offset": offset + limit if offset + limit < len(cards) else None,
         }
         if reping:
             reping_result, re_pinged = self._run_reping(due, schema)

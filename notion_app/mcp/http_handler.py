@@ -128,6 +128,8 @@ TOOLS_SCHEMA: list[dict] = [
             "type": "object",
             "properties": {
                 "limit": {"type": "integer", "default": 10, "description": "Max cards to return (1-25)."},
+                "offset": {"type": "integer", "default": 0,
+                           "description": "Skip this many cards of the same ordering (paging). Response carries next_offset (null when exhausted)."},
                 "reping": {"type": "boolean", "default": False, "description": (
                     "SIDE EFFECT when true: sends a Telegram reminder to the sysadmin for "
                     "due Need Human cards and writes ping-tracking properties. Default "
@@ -437,7 +439,8 @@ def _h_need_attention(board: KanbanBoard, args: dict) -> dict:
     # exists and set_property's use of the same guard.
     return board.list_cards_need_attention(
         limit=args.get("limit") or 10,
-        reping=bool(coerce_transport_value(args.get("reping"))))
+        reping=bool(coerce_transport_value(args.get("reping"))),
+        offset=int(coerce_transport_value(args.get("offset")) or 0))
 
 
 def _h_get_card(board: KanbanBoard, args: dict) -> dict:
