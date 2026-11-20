@@ -167,6 +167,11 @@ def test_cards_need_attention_has_work_true_with_cards(monkeypatch):
         # AP-MT consumer contract: top-level scanned, equal to counts.scanned.
         assert body["scanned"] == 2 == body["counts"]["scanned"]
 
+        # scanned is the scan size, not the returned count (beyond_window).
+        limited = client.get("/kanban/cards-need-attention", params={"limit": 1}).json()
+        assert limited["counts"]["count"] == 1
+        assert limited["scanned"] == 2 == limited["counts"]["scanned"]
+
 
 def test_cards_need_attention_has_work_false_with_no_cards(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
