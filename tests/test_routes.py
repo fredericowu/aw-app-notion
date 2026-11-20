@@ -164,6 +164,13 @@ def test_cards_need_attention_has_work_true_with_cards(monkeypatch):
         assert body["has_work"] is True
         assert {c["page_id"] for c in body["cards"]} == {"p1", "p2"}
         assert body["counts"] == {"count": 2, "scanned": 2, "truncated": False}
+        # AP-MT consumer contract: top-level scanned, equal to counts.scanned.
+        assert body["scanned"] == 2 == body["counts"]["scanned"]
+
+        # scanned is the scan size, not the returned count (beyond_window).
+        limited = client.get("/kanban/cards-need-attention", params={"limit": 1}).json()
+        assert limited["counts"]["count"] == 1
+        assert limited["scanned"] == 2 == limited["counts"]["scanned"]
 
 
 def test_cards_need_attention_has_work_false_with_no_cards(monkeypatch):
@@ -177,6 +184,7 @@ def test_cards_need_attention_has_work_false_with_no_cards(monkeypatch):
         assert body["has_work"] is False
         assert body["cards"] == []
         assert body["counts"] == {"count": 0, "scanned": 0, "truncated": False}
+        assert body["scanned"] == 0
 
 
 def test_cards_need_attention_limit_clamp_passthrough(monkeypatch):
