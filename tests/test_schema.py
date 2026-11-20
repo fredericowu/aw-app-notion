@@ -85,6 +85,15 @@ def test_missing_properties_are_created_via_patch_databases():
     assert client.schema["UpdateRunIds"]["type"] == "rich_text"
 
 
+def test_agents_platform_run_stats_columns_are_created():
+    client = SchemaClient({"Nome": {"type": "title"}, "Status": {"type": "status"}})
+    r = schema_mod.ensure_schema(client, DB)
+    assert {"HopCount", "TotalTokens"} <= set(r["created"])
+    (_m, _p, body), = client.writes
+    assert body["properties"]["HopCount"] == {"number": {"format": "number"}}
+    assert body["properties"]["TotalTokens"] == {"number": {"format": "number"}}
+
+
 def test_already_present_is_a_noop():
     client = SchemaClient(_full_schema())
     r = schema_mod.ensure_schema(client, DB)

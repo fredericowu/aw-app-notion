@@ -1,7 +1,8 @@
 """Board-schema validation + additive repair for the Kanban database.
 
 The app reads and writes a set of named properties on the board (provenance,
-dedup, sweep markers, deploy markers, ...). Nothing created them: a board
+dedup, sweep markers, deploy markers, run-done stats written by
+agents-platform: HopCount / TotalTokens, ...). Nothing created them: a board
 set up before a given release simply lacked the newer columns, and the first
 symptom was ``create_kanban_task`` refusing with "board schema is missing
 managed provenance properties" while comments / ``set_kanban_property``
@@ -71,6 +72,11 @@ MANAGED_PROPERTIES: dict[str, str] = {
     "LastDeployReminderAt": "date",
     "is_live": "checkbox",
     "is_deployment_needed": "checkbox",
+    # written by agents-platform-multitenant's kanban_writer.notify_run_done
+    # through this app's set-property route; absent columns surface as
+    # "unknown property 'TotalTokens'" alerts
+    "HopCount": "number",
+    "TotalTokens": "number",
 }
 
 # Other existing types that are equally valid for a managed name — the
