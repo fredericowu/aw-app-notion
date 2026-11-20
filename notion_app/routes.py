@@ -263,7 +263,7 @@ def build_routes(ctx) -> FastAPI:
         return JSONResponse(result, status_code=code)
 
     @app.get("/kanban/cards-need-attention")
-    async def kanban_cards_need_attention(limit: int = 10, reping: bool = False):
+    async def kanban_cards_need_attention(limit: int = 10, reping: bool = False, offset: int = 0):
         """Sync wrapper over the same ``list_cards_need_attention`` the
         ``list_kanban_cards_need_attention`` MCP tool calls (_h_need_attention
         in mcp/http_handler.py) — for the kanban-sweep dag Workflow's
@@ -286,14 +286,15 @@ def build_routes(ctx) -> FastAPI:
         (mcp/http_handler.py's ``handle_request``); this route has no such
         shared wrapper, and is polled periodically by the kanban-sweep dag
         Workflow's http node, so a stall here recurs on every poll."""
-        def _run(limit: int, reping: bool) -> dict:
-            result = board.list_cards_need_attention(limit=limit, reping=reping)
+        def _run(limit: int, reping: bool, offset: int) -> dict:
+            result = board.list_cards_need_attention(limit=limit, reping=reping, offset=offset)
             out = {
                 "has_work": result["count"] > 0,
                 "cards": result["cards"],
                 # Top-level mirror of counts.scanned: the AP-MT sweep gate
                 # reads ``scanned`` from the body root (scanned/beyond_window).
                 "scanned": result["scanned"],
+                "next_offset": result.get("next_offset"),
                 "counts": {"count": result["count"], "scanned": result["scanned"],
                           "truncated": result["truncated"]},
             }
@@ -301,7 +302,7 @@ def build_routes(ctx) -> FastAPI:
                 out["re_pinged"] = result["re_pinged"]
                 out["reping"] = result["reping"]
             return out
-        return await run_in_threadpool(_kanban, _run, limit, reping)
+        return await run_in_threadpool(_kanban, _run, limit, reping, offset)
 
     # ------------------------------------------------------------------
     # Notion → knowledge base sync (the monolith's ``./aw notion-sync``).

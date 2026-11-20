@@ -449,6 +449,21 @@ def test_need_attention_limit_is_clamped_to_1_25():
     assert len(board.list_cards_need_attention(limit=0)["cards"]) == 1
 
 
+def test_need_attention_offset_pages_the_same_ordering():
+    pages = [_need_attention_page(f"p{i}", created=f"2026-11-{i + 1:02d}T00:00:00.000Z")
+             for i in range(7)]
+    board, client = _board({
+        ("POST", f"/databases/{DB_ID}/query"): {"results": pages, "has_more": False},
+    })
+    first = board.list_cards_need_attention(limit=3)
+    second = board.list_cards_need_attention(limit=3, offset=first["next_offset"])
+    last = board.list_cards_need_attention(limit=3, offset=second["next_offset"])
+    ids = [c["page_id"] for r in (first, second, last) for c in r["cards"]]
+    assert ids == [f"p{i}" for i in range(6, -1, -1)]
+    assert first["next_offset"] == 3 and second["next_offset"] == 6
+    assert last["next_offset"] is None and last["count"] == 1
+
+
 def test_need_attention_card_shape_adds_last_swept_at_without_touching_summarise():
     page = _need_attention_page("p1", last_swept_at="2026-11-11")
     board, client = _board({
