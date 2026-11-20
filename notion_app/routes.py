@@ -291,6 +291,9 @@ def build_routes(ctx) -> FastAPI:
             out = {
                 "has_work": result["count"] > 0,
                 "cards": result["cards"],
+                # Top-level mirror of counts.scanned: the AP-MT sweep gate
+                # reads ``scanned`` from the body root (scanned/beyond_window).
+                "scanned": result["scanned"],
                 "counts": {"count": result["count"], "scanned": result["scanned"],
                           "truncated": result["truncated"]},
             }
