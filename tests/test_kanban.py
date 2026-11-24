@@ -2319,3 +2319,70 @@ def test_failed_mutation_does_not_stamp_update_run():
         result = board.add_comment("page-1", "")
     assert not result["ok"]
     assert not any(path == "/pages/page-1" for _method, path, _body in fake.calls)
+
+
+# ── QA findings card ────────────────────────────────────────────────────
+
+FINDING = {"title": "POST /x returns 500", "severity": "major",
+           "evidence": "curl -X POST /x -> 500 {\"detail\":\"boom\"}"}
+
+
+def _findings_board(existing=None):
+    responses = {
+        ("GET", f"/databases/{DB_ID}"): {"properties": SCHEMA},
+        ("GET", "/pages/origin-1"): _page("origin-1", title="Ship the thing", status="Testing"),
+        ("POST", f"/databases/{DB_ID}/query"): {"results": [existing] if existing else []},
+        ("POST", "/pages"): {"id": "find-1", "url": "https://notion.so/find-1"},
+    }
+    return _board(responses)
+
+
+def _blocks(client, page_id):
+    return [c[2]["children"] for c in client.calls
+            if c[0] == "PATCH" and c[1] == f"/blocks/{page_id}/children"]
+
+
+def test_qa_findings_creates_one_tagged_backlog_card_per_target_with_todos():
+    board, client = _findings_board()
+    result = board.record_qa_findings(target_slug="tgt-1", page_id="origin-1",
+                                      revision="abc123", findings=[FINDING], summary="1 issue")
+    assert result["ok"] is True and result["is_new"] is True and result["added"] == 1
+    created = [c for c in client.calls if c[0] == "POST" and c[1] == "/pages"][0][2]["properties"]
+    assert created["Status"] == {"select": {"name": "Backlog"}}
+    assert created["Tags"] == {"multi_select": [{"name": "qa-findings"}]}
+    assert created["FindingKey"]["rich_text"][0]["text"]["content"] == "qa-findings:tgt-1"
+    todos = [b for group in _blocks(client, "find-1") for b in group if b["type"] == "to_do"]
+    assert len(todos) == 1 and todos[0]["to_do"]["checked"] is False
+    text = "".join(t["text"]["content"] for t in todos[0]["to_do"]["rich_text"])
+    assert "POST /x returns 500" in text and "Ship the thing" in text
+    assert any(t["text"].get("link", {}).get("url") == "https://notion.so/origin-1"
+               for t in todos[0]["to_do"]["rich_text"])
+
+
+def test_qa_findings_reuses_the_existing_card_and_reopens_a_done_one():
+    board, client = _findings_board(existing=_page("find-1", status="Done"))
+    result = board.record_qa_findings(target_slug="tgt-1", page_id="origin-1",
+                                      revision="abc123", findings=[FINDING])
+    assert result["ok"] is True and result["is_new"] is False and result["reopened"] is True
+    assert not [c for c in client.calls if c[0] == "POST" and c[1] == "/pages"]
+    assert [c for c in client.calls if c[0] == "PATCH" and c[1] == "/pages/find-1"]
+    assert any(b["type"] == "to_do" for group in _blocks(client, "find-1") for b in group)
+
+
+def test_qa_findings_reopens_an_archived_card_instead_of_dropping_the_findings():
+    board, client = _findings_board(existing=_page("find-1", status="Archived"))
+    result = board.record_qa_findings(target_slug="tgt-1", page_id="origin-1",
+                                      revision="abc123", findings=[FINDING])
+    assert result["ok"] is True and result["reopened"] is True
+    assert any(b["type"] == "to_do" for group in _blocks(client, "find-1") for b in group)
+
+
+def test_qa_findings_rejects_a_finding_without_evidence_and_a_missing_target():
+    board, client = _findings_board()
+    no_evidence = board.record_qa_findings(target_slug="tgt-1", page_id="origin-1", revision="r",
+                                           findings=[{"title": "looks wrong"}])
+    assert no_evidence["ok"] is False
+    no_target = board.record_qa_findings(target_slug="", page_id="origin-1", revision="r",
+                                         findings=[FINDING])
+    assert no_target["ok"] is False
+    assert not [c for c in client.calls if c[0] == "POST" and c[1] == "/pages"]

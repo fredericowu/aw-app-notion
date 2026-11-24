@@ -89,7 +89,7 @@ _ALSO_ACCEPTED: dict[str, frozenset[str]] = {
 # Select options seeded on creation only. Existing options are never touched.
 _SELECT_OPTIONS: dict[str, list[str]] = {
     "Priority": ["High", "Medium", "Low"],
-    "QAStatus": ["need_human", "ready_to_deploy", "done"],
+    "QAStatus": ["need_human", "ready_to_deploy", "done", "issues"],
 }
 
 # database_id → last result. Keyed so a board-id change never reports the

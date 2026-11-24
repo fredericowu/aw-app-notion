@@ -68,6 +68,9 @@ _DEPLOY_LINTERS = {
     "DeployToVersion": lint_deploy_to_version,
 }
 
+QA_FINDINGS_TAG = "qa-findings"
+QA_FINDINGS_KEY_PREFIX = "qa-findings:"
+
 _PROVENANCE_PROPERTIES = frozenset({"CreateRunId", "UpdateRunIds"})
 _PROVENANCE_LIMIT = 2000
 
@@ -988,6 +991,72 @@ class KanbanBoard:
                 "approval_sent": False,
                 "note": "Card created in Backlog. No Telegram approval was sent and no run "
                         "was dispatched — both belong to agents-platform, not this app."}
+
+    # ── QA findings ─────────────────────────────────────────────────────
+    @_tracked_mutation
+    def record_qa_findings(self, *, target_slug: str, page_id: str, revision: str,
+                           findings: list[dict], summary: str = "") -> dict:
+        """Post QA findings to the target's single findings card.
+
+        One card per target, keyed ``qa-findings:<target_slug>``: created in
+        Backlog on the first finding, reused afterwards. A card already in
+        Done or archived is reopened to Backlog, since new findings are new
+        work for a human to triage. Each QA pass appends a section to the
+        card body: a line linking the tested card, then one unchecked to-do
+        per finding so a reviewer can tick them off in Notion.
+
+        The card is tagged ``qa-findings`` and is never dispatched from here;
+        deciding what to fix stays with a human.
+        """
+        target_slug = (target_slug or "").strip()
+        revision = (revision or "").strip()
+        if not target_slug:
+            return {"ok": False, "error": "target_slug is required (findings are filed per target)"}
+        clean: list[dict] = []
+        for raw in findings or []:
+            if not isinstance(raw, dict):
+                continue
+            title = str(raw.get("title") or "").strip()
+            evidence = str(raw.get("evidence") or "").strip()
+            if title and evidence:
+                clean.append({"title": title[:300], "evidence": evidence[:1200],
+                              "severity": str(raw.get("severity") or "minor").strip().lower()[:20]})
+        if not clean:
+            return {"ok": False, "error": "at least one finding with a title and evidence is required"}
+
+        origin = self.get_card(page_id) if page_id else {}
+        origin_title = origin.get("title") or page_id or "(no card)"
+        origin_url = origin.get("url") or ""
+        origin_ref = f"[{origin_title}]({origin_url})" if origin_url else origin_title
+
+        created = self.create_card(
+            title=f"QA findings: {target_slug}", finding_key=f"{QA_FINDINGS_KEY_PREFIX}{target_slug}",
+            target_slug=target_slug, source="qa", tags=[QA_FINDINGS_TAG], priority="Medium",
+            input_text=("Triage card, not a work order. Review each unchecked item, decide "
+                        "whether to fix it, open a card for it, or dismiss it, then tick it. "
+                        "Do not dispatch an agent on this card."),
+            description=f"Findings QA reproduced against target {target_slug}.")
+        if not created.get("ok"):
+            return created
+        findings_id = created["page_id"]
+        reopened = False
+        if created.get("skipped"):  # archived: new findings reopen it
+            reopened = bool(self.move_card(findings_id, "backlog").get("ok"))
+        elif created.get("regression"):
+            reopened = True
+
+        header = (f"{_today()} · {origin_ref}" + (f" · revision {revision}" if revision else "")
+                  + (f"\n{summary.strip()}" if summary.strip() else ""))
+        blocks: list[dict] = [{"object": "block", "type": "paragraph",
+                               "paragraph": {"rich_text": text_to_rich_text(header)}}]
+        for f in clean:
+            text = f"[{f['severity']}] {f['title']}: {f['evidence']} ({origin_ref})"
+            blocks.append({"object": "block", "type": "to_do",
+                           "to_do": {"rich_text": text_to_rich_text(text), "checked": False}})
+        self.client.append_blocks(findings_id, blocks)
+        return {"ok": True, "findings_page_id": findings_id, "findings_url": created.get("url", ""),
+                "is_new": bool(created.get("is_new")), "reopened": reopened,
+                "added": len(clean), "origin_page_id": page_id}
 
     def _find_by_finding_key(self, db_id: str, finding_key: str) -> dict | None:
         try:
