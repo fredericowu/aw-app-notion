@@ -229,6 +229,16 @@ def build_routes(ctx) -> FastAPI:
             if data.get(k) is not None
             })
 
+    @app.post("/kanban/qa-findings")
+    async def kanban_qa_findings(request: Request, data: dict = Body(...)):
+        with caller_run(request.headers.get(CALLER_RUN_ID_HEADER)):
+            return _kanban(board.record_qa_findings,
+                           target_slug=data.get("target_slug") or "",
+                           page_id=data.get("page_id") or "",
+                           revision=data.get("revision") or "",
+                           findings=data.get("findings") or [],
+                           summary=data.get("summary") or "")
+
     @app.post("/kanban/move")
     async def kanban_move(request: Request, data: dict = Body(...)):
         with caller_run(request.headers.get(CALLER_RUN_ID_HEADER)):
