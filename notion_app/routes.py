@@ -322,8 +322,7 @@ def build_routes(ctx) -> FastAPI:
         to the PO agent node).
 
         ``plan_slug`` filters on the PlanSlug property (server side).
-        ``target_slug`` filters on TargetSlug (applied here: the board query
-        only filters by plan). Both are optional; with neither, the whole
+        ``target_slug`` filters on TargetSlug (also server side). Both are optional; with neither, the whole
         board's Planned column is returned. Alongside ``planned`` the
         payload carries ``in_flight`` — the Ready and In Progress cards of
         the same scope — so the picker can judge delivery order and the
@@ -337,11 +336,11 @@ def build_routes(ctx) -> FastAPI:
             cap = max(1, min(int(limit or 25), 50))
 
             def scoped(status: str, n: int) -> list[dict]:
-                cards = board.list_cards(status=status, plan_slug=plan_slug,
-                                         limit=100)["cards"]
-                if target_slug:
-                    cards = [c for c in cards if c.get("target_slug") == target_slug]
-                return cards[:n]
+                # Both slugs are filtered inside the Notion query, never
+                # after a single page: a post-filter on a full newest-first
+                # page would report "no work" while matches sit on page 2.
+                return board.list_cards(status=status, plan_slug=plan_slug,
+                                        target_slug=target_slug, limit=n)["cards"]
 
             planned = scoped("planned", cap)
             in_flight = scoped("ready", 50) + scoped("running", 50)

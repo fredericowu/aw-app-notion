@@ -544,9 +544,11 @@ def test_planned_cards_splits_planned_from_in_flight_and_filters_target(monkeypa
                 return _FakeNotionResp({"properties": NEED_ATTENTION_SCHEMA})
             import json as _json
             want = _json.loads(req.data)["filter"]
+            assert any(f.get("property") == "TargetSlug" for f in want["and"]), \
+                "target filter must be pushed into the Notion query"
             status = next(f for f in want["and"] if "select" in f)["select"]["equals"] \
                 if "and" in want else want["select"]["equals"]
-            rows = {"Planned": [_planned_page("a"), _planned_page("b", target="t-other")],
+            rows = {"Planned": [_planned_page("a")],
                     "Ready": [_planned_page("r", status="Ready")],
                     "In Progress": []}[status]
             return _FakeNotionResp({"results": rows, "has_more": False})
