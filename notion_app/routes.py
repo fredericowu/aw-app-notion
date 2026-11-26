@@ -314,6 +314,47 @@ def build_routes(ctx) -> FastAPI:
             return out
         return await run_in_threadpool(_kanban, _run, limit, reping, offset)
 
+    @app.get("/kanban/planned-cards")
+    async def kanban_planned_cards(plan_slug: str = "", target_slug: str = "",
+                                   limit: int = 25):
+        """Planned cards a Product Owner could pull into motion, for the
+        ``plan-motion`` dag Workflow's http node (gate, then hand the payload
+        to the PO agent node).
+
+        ``plan_slug`` filters on the PlanSlug property (server side).
+        ``target_slug`` filters on TargetSlug (applied here: the board query
+        only filters by plan). Both are optional; with neither, the whole
+        board's Planned column is returned. Alongside ``planned`` the
+        payload carries ``in_flight`` — the Ready and In Progress cards of
+        the same scope — so the picker can judge delivery order and the
+        work already moving instead of ranking blind.
+
+        ``has_work`` is true only when there is at least one Planned card;
+        a scope with nothing Planned stops the workflow with zero LLM
+        dispatch. Run off the event loop for the same reason as
+        ``cards-need-attention``: several paced Notion calls."""
+        def _run(plan_slug: str, target_slug: str, limit: int) -> dict:
+            cap = max(1, min(int(limit or 25), 50))
+
+            def scoped(status: str, n: int) -> list[dict]:
+                cards = board.list_cards(status=status, plan_slug=plan_slug,
+                                         limit=100)["cards"]
+                if target_slug:
+                    cards = [c for c in cards if c.get("target_slug") == target_slug]
+                return cards[:n]
+
+            planned = scoped("planned", cap)
+            in_flight = scoped("ready", 50) + scoped("running", 50)
+            return {
+                "has_work": len(planned) > 0,
+                "plan_slug": plan_slug or None,
+                "target_slug": target_slug or None,
+                "planned": planned,
+                "in_flight": in_flight,
+                "counts": {"planned": len(planned), "in_flight": len(in_flight)},
+            }
+        return await run_in_threadpool(_kanban, _run, plan_slug, target_slug, limit)
+
     # ------------------------------------------------------------------
     # Notion → knowledge base sync (the monolith's ``./aw notion-sync``).
     # The CLI command in commands/notion_sync.py is a thin client over
