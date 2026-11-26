@@ -195,7 +195,7 @@ class KanbanBoard:
 
     # ── read ────────────────────────────────────────────────────────────
     def list_cards(self, *, status: str = "", source: str = "", plan_slug: str = "",
-                   limit: int = 25, order: str = "created") -> dict:
+                   target_slug: str = "", limit: int = 25, order: str = "created") -> dict:
         """Query the board. ``status`` is a logical key or a raw Notion option
         name; omit it for every card regardless of status.
 
@@ -223,6 +223,8 @@ class KanbanBoard:
             filters.append({"property": "Source", "rich_text": {"equals": source}})
         if plan_slug:
             filters.append({"property": "PlanSlug", "rich_text": {"equals": plan_slug}})
+        if target_slug:
+            filters.append({"property": "TargetSlug", "rich_text": {"equals": target_slug}})
         if len(filters) == 1:
             body["filter"] = filters[0]
         elif filters:

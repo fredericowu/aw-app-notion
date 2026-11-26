@@ -513,3 +513,60 @@ def test_bot_surfaces_notions_own_error_status(monkeypatch):
         resp = client.get("/bot")
 
     assert resp.status_code == 401
+
+
+# ── GET /kanban/planned-cards — the plan-motion workflow's feed ───────────
+
+
+def _planned_page(page_id, *, status="Planned", plan="productize", target="t-mac"):
+    page = _need_attention_page(page_id, status=status)
+    page["properties"]["PlanSlug"] = {"type": "rich_text",
+                                      "rich_text": [{"plain_text": plan}]}
+    page["properties"]["TargetSlug"] = {"type": "rich_text",
+                                        "rich_text": [{"plain_text": target}]}
+    return page
+
+
+def test_planned_cards_is_503_when_unconfigured():
+    with tempfile.TemporaryDirectory() as tmp:
+        client, _ctx = _client(Path(tmp))
+        assert client.get("/kanban/planned-cards").status_code == 503
+
+
+def test_planned_cards_splits_planned_from_in_flight_and_filters_target(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        client, ctx = _configured_client(Path(tmp))
+        ctx.config["kanban_statuses"] = {}
+        from notion_app.kanban import client as client_mod
+
+        def fake_urlopen(req, timeout=None):
+            if req.get_method() == "GET":
+                return _FakeNotionResp({"properties": NEED_ATTENTION_SCHEMA})
+            import json as _json
+            want = _json.loads(req.data)["filter"]
+            assert any(f.get("property") == "TargetSlug" for f in want["and"]), \
+                "target filter must be pushed into the Notion query"
+            status = next(f for f in want["and"] if "select" in f)["select"]["equals"] \
+                if "and" in want else want["select"]["equals"]
+            rows = {"Planned": [_planned_page("a")],
+                    "Ready": [_planned_page("r", status="Ready")],
+                    "In Progress": []}[status]
+            return _FakeNotionResp({"results": rows, "has_more": False})
+
+        monkeypatch.setattr(client_mod.urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(client_mod.time, "sleep", lambda _s: None)
+
+        body = client.get("/kanban/planned-cards",
+                          params={"plan_slug": "productize", "target_slug": "t-mac"}).json()
+        assert body["has_work"] is True
+        assert [c["page_id"] for c in body["planned"]] == ["a"]
+        assert [c["page_id"] for c in body["in_flight"]] == ["r"]
+        assert body["counts"] == {"planned": 1, "in_flight": 1}
+
+
+def test_planned_cards_has_work_false_when_nothing_planned(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        client, _ctx = _configured_client(Path(tmp))
+        _patch_notion_api(monkeypatch, [])
+        body = client.get("/kanban/planned-cards", params={"plan_slug": "p"}).json()
+        assert body["has_work"] is False and body["planned"] == []
