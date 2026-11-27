@@ -77,6 +77,9 @@ MANAGED_PROPERTIES: dict[str, str] = {
     # "unknown property 'TotalTokens'" alerts
     "HopCount": "number",
     "TotalTokens": "number",
+    # PM split rule: on the NEW card, the page id of the original card it was
+    # split from (title is prefixed "[SPLIT] "). Set via set_kanban_property.
+    "SplitCard": "rich_text",
 }
 
 # Other existing types that are equally valid for a managed name — the
