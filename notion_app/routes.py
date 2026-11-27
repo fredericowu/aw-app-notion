@@ -314,6 +314,14 @@ def build_routes(ctx) -> FastAPI:
             return out
         return await run_in_threadpool(_kanban, _run, limit, reping, offset)
 
+    @app.get("/kanban/lane-counts")
+    async def kanban_lane_counts():
+        """Need Human / In Progress lane counts for the AP-MT ``planned_intake``
+        gate node. Pure read (no reping, no writes); a non-2xx (503 when the
+        board is unconfigured) lets the gate fail closed. Off the event loop
+        for the same reason as ``cards-need-attention``."""
+        return await run_in_threadpool(_kanban, board.lane_counts)
+
     @app.get("/kanban/planned-cards")
     async def kanban_planned_cards(plan_slug: str = "", target_slug: str = "",
                                    limit: int = 25):
