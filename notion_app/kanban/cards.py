@@ -293,7 +293,10 @@ class KanbanBoard:
             result = self.client.query_database(db_id, query)
             for page in result.get("results", []):
                 scanned += 1
-                status = self._summarise(page).get("status")
+                # The property the QUERY filtered on (a board may name it
+                # "Stage"), not the literal "Status" _summarise reads.
+                status = extract_property_value(
+                    page.get("properties", {}).get(prop_name, {}))
                 if status == need_human:
                     counts["need_human"] += 1
                 elif status == running:

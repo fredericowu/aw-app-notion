@@ -606,3 +606,23 @@ def test_lane_counts_runs_off_the_event_loop(monkeypatch):
         client, _ctx = _client(Path(tmp))
         client.get("/kanban/lane-counts")
     assert len(calls) == 1
+
+
+def test_lane_counts_reads_the_boards_own_status_property(monkeypatch):
+    """Review finding PR #30: a board whose status property is not literally
+    "Status" must still be tallied from the property the query filtered on."""
+    from notion_app.kanban import client as client_mod
+    page = _need_attention_page("a", status="In Progress")
+    page["properties"]["Stage"] = page["properties"].pop("Status")
+
+    def fake_urlopen(req, timeout=None):
+        if req.get_method() == "GET":
+            return _FakeNotionResp({"properties": {"Stage": {"type": "select"}}})
+        return _FakeNotionResp({"results": [page], "has_more": False})
+
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(client_mod.time, "sleep", lambda _s: None)
+    with tempfile.TemporaryDirectory() as tmp:
+        client, _ctx = _configured_client(Path(tmp))
+        body = client.get("/kanban/lane-counts").json()
+    assert (body["in_progress"], body["total"]) == (1, 1)
