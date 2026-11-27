@@ -75,6 +75,16 @@ _PROVENANCE_PROPERTIES = frozenset({"CreateRunId", "UpdateRunIds"})
 _PROVENANCE_LIMIT = 2000
 
 
+def _cap_run_ids(run_ids: list[str]) -> list[str]:
+    """Drop the OLDEST ids until the JSON encoding fits Notion's rich_text
+    limit. The newest id (last) is always kept, so provenance never blocks the
+    real write on a card that has accumulated many runs."""
+    capped = list(run_ids)
+    while len(capped) > 1 and len(json.dumps(capped, separators=(",", ":"))) > _PROVENANCE_LIMIT:
+        capped.pop(0)
+    return capped
+
+
 def _tracked_mutation(fn):
     """Stamp one successful logical mutation, including compound operations."""
     @functools.wraps(fn)
@@ -91,7 +101,12 @@ def _tracked_mutation(fn):
             page_id = str(result.get("page_id") or "").strip()
             run_id = current_run_id()
             if page_id and run_id:
-                self._record_update_run(page_id, run_id)
+                # Provenance is best-effort: the real write already succeeded,
+                # so a stamping failure must never turn it into an error.
+                try:
+                    self._record_update_run(page_id, run_id)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("UpdateRunIds stamp failed for %s: %s", page_id, exc)
         return result
     return wrapped
 
@@ -171,10 +186,8 @@ class KanbanBoard:
                     raise NotionError(409, "UpdateRunIds is not a JSON string array")
                 if run_id in values:
                     return
-                merged = [*values, run_id]
+                merged = _cap_run_ids([*values, run_id])
                 encoded = json.dumps(merged, separators=(",", ":"))
-                if len(encoded) > _PROVENANCE_LIMIT:
-                    raise NotionError(409, "UpdateRunIds exceeds Notion's 2000-character rich_text limit")
                 self.client.patch_page(
                     page_id, {"UpdateRunIds": build_property_payload(spec.get("type", ""), encoded)})
                 check = self.client.get_page(page_id).get("properties", {}).get("UpdateRunIds", {})

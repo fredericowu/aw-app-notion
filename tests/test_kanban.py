@@ -2313,6 +2313,58 @@ def test_successful_update_appends_once_and_protects_managed_fields():
     assert len(provenance_patches) == 1
 
 
+def _provenance_board(initial):
+    state = {"runs": list(initial)}
+
+    def page(_body):
+        return {"id": "page-1", "properties": {
+            "UpdateRunIds": {"type": "rich_text", "rich_text": [
+                {"plain_text": json.dumps(state["runs"], separators=(",", ":"))}]},
+        }}
+
+    def patch(body):
+        props = body["properties"]
+        if "UpdateRunIds" in props:
+            state["runs"] = json.loads(props["UpdateRunIds"]["rich_text"][0]["text"]["content"])
+        return {}
+
+    board, fake = _board({
+        ("GET", f"/databases/{DB_ID}"): {"properties": {**SCHEMA_WITH_PROVENANCE,
+                                                        "Notes": {"type": "rich_text"}}},
+        ("GET", "/pages/page-1"): page,
+        ("PATCH", "/pages/page-1"): patch,
+        ("POST", "/comments"): {},
+    })
+    return board, state
+
+
+def test_full_update_run_ids_trims_oldest_and_real_write_succeeds():
+    # A history the writer can actually have stored (fits the 2000 limit);
+    # appending the newest id is what crosses it.
+    old = [f"run-{i:03d}-" + "x" * 24 for i in range(57)]
+    assert len(json.dumps(old, separators=(",", ":"))) == 1996
+    board, state = _provenance_board(old)
+    with caller_run("run-newest"):
+        result = board.add_comment("page-1", "hello")
+    assert result["ok"]
+    assert state["runs"][-1] == "run-newest"
+    assert state["runs"][0] != old[0] and old[0] not in state["runs"]
+    assert state["runs"][:-1] == old[len(old) - (len(state["runs"]) - 1):]
+    assert len(json.dumps(state["runs"], separators=(",", ":"))) <= 2000
+
+
+def test_provenance_failure_never_fails_the_real_write(monkeypatch):
+    board, _state = _provenance_board([])
+
+    def boom(*_a, **_k):
+        raise NotionError(409, "UpdateRunIds is not a JSON array")
+
+    monkeypatch.setattr(board, "_record_update_run", boom)
+    with caller_run("run-x"):
+        result = board.add_comment("page-1", "hello")
+    assert result["ok"]
+
+
 def test_failed_mutation_does_not_stamp_update_run():
     board, fake = _board()
     with caller_run("run-failed"):
