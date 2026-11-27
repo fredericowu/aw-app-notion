@@ -94,6 +94,14 @@ def test_agents_platform_run_stats_columns_are_created():
     assert body["properties"]["TotalTokens"] == {"number": {"format": "number"}}
 
 
+def test_split_card_column_is_created_as_rich_text():
+    client = SchemaClient({"Nome": {"type": "title"}, "Status": {"type": "status"}})
+    r = schema_mod.ensure_schema(client, DB)
+    assert "SplitCard" in r["created"]
+    (_m, _p, body), = client.writes
+    assert body["properties"]["SplitCard"] == {"rich_text": {}}
+
+
 def test_already_present_is_a_noop():
     client = SchemaClient(_full_schema())
     r = schema_mod.ensure_schema(client, DB)
