@@ -2339,8 +2339,10 @@ def _provenance_board(initial):
 
 
 def test_full_update_run_ids_trims_oldest_and_real_write_succeeds():
-    old = [f"run-{i:03d}-" + "x" * 24 for i in range(60)]  # ~2000+ chars encoded
-    assert len(json.dumps(old, separators=(",", ":"))) > 1900
+    # A history the writer can actually have stored (fits the 2000 limit);
+    # appending the newest id is what crosses it.
+    old = [f"run-{i:03d}-" + "x" * 24 for i in range(57)]
+    assert len(json.dumps(old, separators=(",", ":"))) == 1996
     board, state = _provenance_board(old)
     with caller_run("run-newest"):
         result = board.add_comment("page-1", "hello")
