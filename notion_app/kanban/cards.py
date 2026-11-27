@@ -260,6 +260,62 @@ class KanbanBoard:
     # 4175bf3b-9510-81e0).
     _REPING_UNROUTED_FAILOPEN_S = 48 * 3600
 
+    def lane_counts(self) -> dict:
+        """Per-lane card counts for the Plan "Planned intake" gate.
+
+        Pure read: pages the same In Progress + Need Human filter as
+        ``list_cards_need_attention`` and counts per lane. No reping, no
+        property writes, no blocker-type filter (human-only blockers count).
+        ``truncated`` means the scan hit ``_NEED_ATTENTION_SCAN_CAP`` and the
+        counts are a lower bound.
+        """
+        db_id = self._require_db()
+        schema = self.client.database_schema(db_id)
+        prop_name = status_property_name(schema)
+        prop_type = schema.get(prop_name, {}).get("type", "select")
+        running = self.config.notion_status("running")
+        need_human = self.config.notion_status("need_human")
+        body: dict[str, Any] = {
+            "filter": {"or": [
+                {"property": prop_name, prop_type: {"equals": running}},
+                {"property": prop_name, prop_type: {"equals": need_human}},
+            ]},
+            "page_size": 100,
+        }
+        counts = {"in_progress": 0, "need_human": 0}
+        scanned = 0
+        truncated = False
+        cursor: str | None = None
+        while True:
+            query = dict(body)
+            if cursor:
+                query["start_cursor"] = cursor
+            result = self.client.query_database(db_id, query)
+            for page in result.get("results", []):
+                scanned += 1
+                # The property the QUERY filtered on (a board may name it
+                # "Stage"), not the literal "Status" _summarise reads.
+                status = extract_property_value(
+                    page.get("properties", {}).get(prop_name, {}))
+                if status == need_human:
+                    counts["need_human"] += 1
+                elif status == running:
+                    counts["in_progress"] += 1
+            has_more = bool(result.get("has_more")) and bool(result.get("next_cursor"))
+            if scanned >= self._NEED_ATTENTION_SCAN_CAP:
+                truncated = has_more
+                break
+            if not has_more:
+                break
+            cursor = result.get("next_cursor")
+        return {
+            "need_human": counts["need_human"],
+            "in_progress": counts["in_progress"],
+            "total": counts["need_human"] + counts["in_progress"],
+            "scanned": scanned,
+            "truncated": truncated,
+        }
+
     def list_cards_need_attention(self, *, limit: int = 10, reping: bool = False,
                                   offset: int = 0) -> dict:
         """Deterministic candidate list for the stale-card sweep: In Progress

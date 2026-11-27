@@ -570,3 +570,59 @@ def test_planned_cards_has_work_false_when_nothing_planned(monkeypatch):
         _patch_notion_api(monkeypatch, [])
         body = client.get("/kanban/planned-cards", params={"plan_slug": "p"}).json()
         assert body["has_work"] is False and body["planned"] == []
+
+
+# ── GET /kanban/lane-counts — Plan "Planned intake" gate's count source ─────
+
+def test_lane_counts_splits_lanes_and_counts_human_only(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        client, _ctx = _configured_client(Path(tmp))
+        _patch_notion_api(monkeypatch, [
+            _need_attention_page("a", status="In Progress"),
+            _need_attention_page("b", status="In Progress"),
+            _need_attention_page("c", status="Need Human"),
+        ])
+        body = client.get("/kanban/lane-counts").json()
+        assert body == {"need_human": 1, "in_progress": 2, "total": 3,
+                        "scanned": 3, "truncated": False}
+
+
+def test_lane_counts_is_503_when_unconfigured():
+    with tempfile.TemporaryDirectory() as tmp:
+        client, _ctx = _client(Path(tmp))
+        assert client.get("/kanban/lane-counts").status_code == 503
+
+
+def test_lane_counts_runs_off_the_event_loop(monkeypatch):
+    calls = []
+    real = routes.run_in_threadpool
+
+    async def spy(fn, *a, **k):
+        calls.append(fn)
+        return await real(fn, *a, **k)
+
+    monkeypatch.setattr(routes, "run_in_threadpool", spy)
+    with tempfile.TemporaryDirectory() as tmp:
+        client, _ctx = _client(Path(tmp))
+        client.get("/kanban/lane-counts")
+    assert len(calls) == 1
+
+
+def test_lane_counts_reads_the_boards_own_status_property(monkeypatch):
+    """Review finding PR #30: a board whose status property is not literally
+    "Status" must still be tallied from the property the query filtered on."""
+    from notion_app.kanban import client as client_mod
+    page = _need_attention_page("a", status="In Progress")
+    page["properties"]["Stage"] = page["properties"].pop("Status")
+
+    def fake_urlopen(req, timeout=None):
+        if req.get_method() == "GET":
+            return _FakeNotionResp({"properties": {"Stage": {"type": "select"}}})
+        return _FakeNotionResp({"results": [page], "has_more": False})
+
+    monkeypatch.setattr(client_mod.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(client_mod.time, "sleep", lambda _s: None)
+    with tempfile.TemporaryDirectory() as tmp:
+        client, _ctx = _configured_client(Path(tmp))
+        body = client.get("/kanban/lane-counts").json()
+    assert (body["in_progress"], body["total"]) == (1, 1)
